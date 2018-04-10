@@ -19,6 +19,8 @@ import Control.Concurrent.MVar
 import Control.Exception as E
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef, readIORef)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Typeable
 -- import Debug.Trace (trace)
@@ -27,20 +29,27 @@ import System.FSNotify.Listener
 import System.FSNotify.Path (findDirs, canonicalizeDirPath)
 import System.FSNotify.Types
 import qualified System.INotify as INo
+import System.Posix.ByteString.FilePath (RawFilePath)
 
 type NativeManager = INo.INotify
 
 data EventVarietyMismatchException = EventVarietyMismatchException deriving (Show, Typeable)
 instance Exception EventVarietyMismatchException
 
+toRawFilePath :: FilePath -> RawFilePath
+toRawFilePath = T.encodeUtf8 . T.pack
+
+fromRawFilePath :: RawFilePath -> FilePath
+fromRawFilePath = T.unpack . T.decodeUtf8
+
 -- Note that INo.Closed in this context is "modified" because we listen to
 -- CloseWrite events.
 fsnEvent :: FilePath -> UTCTime -> INo.Event -> Maybe Event
-fsnEvent basePath timestamp (INo.Created  False       name   ) = Just (Added    (basePath </> name) timestamp)
-fsnEvent basePath timestamp (INo.Closed   False (Just name) _) = Just (Modified (basePath </> name) timestamp)
-fsnEvent basePath timestamp (INo.MovedOut False       name  _) = Just (Removed  (basePath </> name) timestamp)
-fsnEvent basePath timestamp (INo.MovedIn  False       name  _) = Just (Added    (basePath </> name) timestamp)
-fsnEvent basePath timestamp (INo.Deleted  False       name   ) = Just (Removed  (basePath </> name) timestamp)
+fsnEvent basePath timestamp (INo.Created  False       name   ) = Just (Added    (basePath </> fromRawFilePath name) timestamp)
+fsnEvent basePath timestamp (INo.Closed   False (Just name) _) = Just (Modified (basePath </> fromRawFilePath name) timestamp)
+fsnEvent basePath timestamp (INo.MovedOut False       name  _) = Just (Removed  (basePath </> fromRawFilePath name) timestamp)
+fsnEvent basePath timestamp (INo.MovedIn  False       name  _) = Just (Added    (basePath </> fromRawFilePath name) timestamp)
+fsnEvent basePath timestamp (INo.Deleted  False       name   ) = Just (Removed  (basePath </> fromRawFilePath name) timestamp)
 fsnEvent _        _         _                                  = Nothing
 
 handleInoEvent :: ActionPredicate -> EventChannel -> FilePath -> DebouncePayload -> INo.Event -> IO ()
@@ -75,7 +84,7 @@ instance FileListener INo.INotify where
   listen conf iNotify path actPred chan = do
     path' <- canonicalizeDirPath path
     dbp <- newDebouncePayload $ confDebounce conf
-    wd <- INo.addWatch iNotify varieties path' (handler path' dbp)
+    wd <- INo.addWatch iNotify varieties (toRawFilePath path') (handler path' dbp)
     return $ INo.removeWatch wd
     where
       handler :: FilePath -> DebouncePayload -> INo.Event -> IO ()
@@ -118,12 +127,12 @@ instance FileListener INo.INotify where
           case mbWds of
             Nothing -> return mbWds
             Just wds -> do
-              wd <- INo.addWatch iNotify varieties filePath (handler filePath dbp)
+              wd <- INo.addWatch iNotify varieties (toRawFilePath filePath) (handler filePath dbp)
               return $ Just (wd:wds)
         where
           handler :: FilePath -> DebouncePayload -> INo.Event -> IO ()
           handler baseDir _   (INo.Created True dirPath) = do
-            listenRec (baseDir </> dirPath) wdVar
+            listenRec (baseDir </> (fromRawFilePath dirPath)) wdVar
           handler baseDir dbp event                      =
             handleInoEvent actPred chan baseDir dbp event
 
